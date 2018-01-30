@@ -218,8 +218,10 @@ public final class HttpRequest {
   /** OpenCensus tracing component. */
   private Tracer tracer = OpenCensusUtils.getTracer();
 
-  /** Prefix for tracing span name. */
-  private static final String traceSpanNamePrefix = "Sent." + HttpRequest.class.getName() + ".";
+  /**
+   * Prefix for tracing span name. Currently only {@link #execute()} is instrumented.
+   */
+  private static final String TRACE_SPAN_NAME = "Sent." + HttpRequest.class.getName() + ".execute";
 
   /**
    * @param transport HTTP transport
@@ -865,7 +867,7 @@ public final class HttpRequest {
     Preconditions.checkNotNull(requestMethod);
     Preconditions.checkNotNull(url);
 
-    Span span = tracer.spanBuilder(traceSpanNamePrefix + "execute").startSpan();
+    Span span = tracer.spanBuilder(TRACE_SPAN_NAME).startSpan();
     do {
       span.addAnnotation("retry #" + numRetries);
       // Cleanup any unneeded response from a previous iteration
@@ -911,7 +913,7 @@ public final class HttpRequest {
           headers.setUserAgent(originalUserAgent + " " + USER_AGENT_SUFFIX);
         }
       }
-      OpenCensusUtils.propagateTracingContext(headers);
+      OpenCensusUtils.propagateTracingContext(span, headers);
 
       // headers
       HttpHeaders.serializeHeaders(headers, logbuf, curlbuf, logger, lowLevelHttpRequest);
@@ -994,8 +996,12 @@ public final class HttpRequest {
       lowLevelHttpRequest.setTimeout(connectTimeout, readTimeout);
       // switch tracing scope to current span
       Scope ws = tracer.withSpan(span);
+      OpenCensusUtils.logSentMessageEvent(span, lowLevelHttpRequest.getContentLength());
       try {
         LowLevelHttpResponse lowLevelHttpResponse = lowLevelHttpRequest.execute();
+        if (response != null) {
+          OpenCensusUtils.logReceivedMessageEvent(span, lowLevelHttpResponse.getContentLength());
+        }
         // Flag used to indicate if an exception is thrown before the response is constructed.
         boolean responseConstructed = false;
         try {

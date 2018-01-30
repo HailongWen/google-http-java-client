@@ -17,10 +17,13 @@ package com.google.api.client.util;
 import com.google.api.client.http.HttpHeaders;
 import com.google.api.client.http.HttpResponse;
 import com.google.api.client.http.HttpStatusCodes;
+import com.google.common.annotations.VisibleForTesting;
 
 import io.opencensus.contrib.http.util.HttpPropagationUtil;
 import io.opencensus.trace.BlankSpan;
 import io.opencensus.trace.EndSpanOptions;
+import io.opencensus.trace.NetworkEvent;
+import io.opencensus.trace.NetworkEvent.Type;
 import io.opencensus.trace.Span;
 import io.opencensus.trace.Status;
 import io.opencensus.trace.Tracer;
@@ -28,6 +31,7 @@ import io.opencensus.trace.Tracing;
 import io.opencensus.trace.propagation.TextFormat;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.annotation.Nullable;
@@ -46,25 +50,30 @@ public class OpenCensusUtils {
    * OpenCensus tracing component.
    * When no OpenCensus implementation is provided, it will return a no-op tracer.
    */
-  static Tracer tracer = Tracing.getTracer();
+  private static volatile Tracer tracer = Tracing.getTracer();
 
   /**
    * {@link TextFormat} used in tracing context propagation.
    */
   @Nullable
-  static TextFormat propagationTextFormat = null;
+  @VisibleForTesting
+  static volatile TextFormat propagationTextFormat = null;
 
   /**
-   * {@link TextFormat.Setter} for {@link activeTextFormat}.
+   * {@link TextFormat.Setter} for {@link #propagationTextFormat}.
    */
   @Nullable
-  static TextFormat.Setter propagationTextFormatSetter = null;
+  @VisibleForTesting
+  static volatile TextFormat.Setter propagationTextFormatSetter = null;
+
+  private static AtomicLong idGenerator = new AtomicLong();
 
   /**
    * Sets the {@link TextFormat} used in context propagation.
    * @param textFormat the text format.
    */
-  public static void setPropagationTextFormat(@Nullable TextFormat textFormat) {
+  @VisibleForTesting
+  static void setPropagationTextFormat(@Nullable TextFormat textFormat) {
     propagationTextFormat = textFormat;
   }
 
@@ -72,7 +81,8 @@ public class OpenCensusUtils {
    * Sets the {@link TextFormat.Setter} used in context propagation.
    * @param textFormatSetter the {@code TextFormat.Setter} for the text format.
    */
-  public static void setPropagationTextFormatSetter(@Nullable TextFormat.Setter textFormatSetter) {
+  @VisibleForTesting
+  static void setPropagationTextFormatSetter(@Nullable TextFormat.Setter textFormatSetter) {
     propagationTextFormatSetter = textFormatSetter;
   }
 
@@ -88,12 +98,15 @@ public class OpenCensusUtils {
   /**
    * Propagate information of current tracing context. This information will be injected into HTTP
    * header.
+   *
+   * @param span the span to be propagated.
+   * @param headers the headers used in propagation.
    */
-  public static void propagateTracingContext(HttpHeaders headers) {
-    Preconditions.checkNotNull(headers);
+  public static void propagateTracingContext(Span span, HttpHeaders headers) {
+    Preconditions.checkArgument(span != null, "span should not be null.");
+    Preconditions.checkArgument(headers != null, "headers should not be null.");
     if (propagationTextFormat != null && propagationTextFormatSetter != null) {
-      Span span = tracer.getCurrentSpan();
-      if (span != null && !span.equals(BlankSpan.INSTANCE)) {
+      if (!span.equals(BlankSpan.INSTANCE)) {
         propagationTextFormat.inject(span.getContext(), headers, propagationTextFormatSetter);
       }
     }
@@ -107,7 +120,7 @@ public class OpenCensusUtils {
    */
   public static EndSpanOptions getEndSpanOptions(@Nullable Integer statusCode) {
     // Always sample the span, but optionally export it.
-    EndSpanOptions.Builder builder = EndSpanOptions.builder().setSampleToLocalSpanStore(true);
+    EndSpanOptions.Builder builder = EndSpanOptions.builder();
     if (statusCode == null) {
       builder.setStatus(Status.UNKNOWN);
     } else if (!HttpStatusCodes.isSuccess(statusCode)) {
@@ -139,6 +152,37 @@ public class OpenCensusUtils {
     return builder.build();
   }
 
+  /**
+   * Log a new message event which contains the size of the request.
+   *
+   * @param span The {@code span} in which the send event occurs.
+   * @param size Size of the request.
+   */
+  public static void logSentMessageEvent(Span span, long size) {
+    logMessageEvent(span, size, Type.SENT);
+  }
+  /**
+   * Log a new message event which contains the size of the response.
+   *
+   * @param span The {@code span} in which the receive event occurs.
+   */
+  public static void logReceivedMessageEvent(Span span, long size) {
+    logMessageEvent(span, size, Type.RECV);
+  }
+
+  /**
+   * Log a message event. Currently use the {@link NetworkEvent} API.
+   */
+  @VisibleForTesting
+  static void logMessageEvent(Span span, long size, Type eventType) {
+    Preconditions.checkArgument(span != null, "span should not be null.");
+    NetworkEvent event = NetworkEvent
+        .builder(eventType, idGenerator.getAndIncrement())
+        .setUncompressedMessageSize(size)
+        .build();
+    span.addNetworkEvent(event);
+  }
+
   static {
     try {
       propagationTextFormat = HttpPropagationUtil.getCloudTraceFormat();
@@ -149,7 +193,7 @@ public class OpenCensusUtils {
         }
       };
     } catch (Exception e) {
-      LOGGER.log(Level.WARNING, "Cannot initiate OpenCensus modules, tracing disabled", e);
+      LOGGER.log(Level.WARNING, "Cannot initialize OpenCensus modules, tracing disabled.", e);
     }
   }
 
